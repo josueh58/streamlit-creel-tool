@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date
+from datetime import date, datetime
 import holidays
+US_HOLIDAYS = holidays.UnitedStates()
 import calendar
 import altair as alt
+from ics import Calendar, Event
 
 # ----------------------------------
 # 1. Sampling Calendar Generator
@@ -25,8 +27,8 @@ def generate_sampling_calendar(start_date, end_date):
 # ----------------------------------
 # 2. Preprocessing Functions
 # ----------------------------------
+
 def preprocess_contact(df):
-    # build date
     if {'year','month','day'}.issubset(df.columns):
         df['date'] = pd.to_datetime(df[['year','month','day']])
     else:
@@ -37,9 +39,7 @@ def preprocess_contact(df):
     df = df.dropna(subset=['date','effort','anglers'])
     return df[['date','effort','anglers']]
 
-
 def preprocess_fish(df):
-    # build date
     if {'Year','Month','Day'}.issubset(df.columns):
         df['date'] = pd.to_datetime(df[['Year','Month','Day']])
     else:
@@ -50,21 +50,32 @@ def preprocess_fish(df):
     df = df.dropna(subset=['date','species','length'])
     return df[['date','species','length','catch']]
 
-
 def preprocess_count(df):
-    # build date
     if {'Year','Month','Day'}.issubset(df.columns):
         df['date'] = pd.to_datetime(df[['Year','Month','Day']])
     else:
         df['date'] = pd.to_datetime(df['date'])
-    # identify method columns
     methods = [col for col in df.columns if col.lower() in ['boat','shore','tube','ice']]
     for m in methods:
         df[m] = pd.to_numeric(df[m], errors='coerce').fillna(0)
     return df[['date'] + methods]
 
 # ----------------------------------
-# 3. Main App
+# 3. Calendar Export (.ics)
+# ----------------------------------
+def generate_ics_file(sampling_days):
+    cal = Calendar()
+    for d in sampling_days:
+        event = Event()
+        event.name = "Creel Clerk Sampling Day"
+        event.begin = datetime.combine(d, datetime.min.time())
+        event.duration = {"hours": 8}
+        event.description = "Scheduled creel clerk field sampling."
+        cal.events.add(event)
+    return str(cal)
+
+# ----------------------------------
+# 4. Main App
 # ----------------------------------
 def main():
     st.title("Creel Survey Scheduler & Analyzer")
@@ -98,6 +109,9 @@ def main():
         html += '</table>'
         st.markdown(html, unsafe_allow_html=True)
 
+        ics_file = generate_ics_file(days)
+        st.download_button("📅 Download .ics Calendar File", data=ics_file, file_name="creel_calendar.ics")
+
     else:
         st.header("🔍 Data QC & Analysis")
         st.sidebar.header("Upload Raw Excel Files")
@@ -109,37 +123,29 @@ def main():
             st.info("Please upload both Contact Info and Species Composition files.")
             return
 
-        # load & preprocess
         contact_df = preprocess_contact(pd.read_excel(up_con))
         fish_df = preprocess_fish(pd.read_excel(up_spc))
         method_counts = None
         if up_cnt:
             cnt_raw = pd.read_excel(up_cnt)
             cnt_df = preprocess_count(cnt_raw)
-            # merge total catch into contact for consistency if needed
             contact_df = contact_df.merge(cnt_df.assign(total_catch=cnt_df[[c for c in cnt_df.columns if c!='date']].sum(axis=1)), on='date', how='left')
-            # prepare method summary
             melt = cnt_df.melt(id_vars=['date'], var_name='method', value_name='catch')
             method_counts = melt.groupby('method')['catch'].sum().reset_index()
 
-        # QC summary
         st.subheader("QC Summary")
         st.write(f"Contact rows: {len(contact_df)}")
         st.write(f"Fish rows: {len(fish_df)}")
 
-        # Summaries
-        # Daily
         csum = contact_df.groupby('date').agg(total_effort=('effort','sum')).reset_index()
         fsum = fish_df.groupby('date').agg(total_catch=('catch','sum')).reset_index()
         summary = pd.merge(csum, fsum, on='date', how='outer').fillna(0)
         summary['CPUE'] = summary['total_catch'] / summary['total_effort'].replace(0, np.nan)
-        # Monthly
         summary['month'] = summary['date'].dt.to_period('M').dt.to_timestamp()
         monthly = summary.groupby('month').agg(monthly_effort=('total_effort','sum'),
                                                monthly_catch=('total_catch','sum')).reset_index()
         monthly['monthly_cpue'] = monthly['monthly_catch'] / monthly['monthly_effort'].replace(0, np.nan)
 
-        # Overall
         total_effort = summary['total_effort'].sum()
         total_catch = summary['total_catch'].sum()
         avg_cpue = total_catch / total_effort if total_effort>0 else np.nan
@@ -168,7 +174,7 @@ def main():
                 ).properties(title='Catch by Method')
                 st.altair_chart(bar_meth, use_container_width=True)
 
-        else:  # Species-Method breakdown
+        else:
             if 'method' in fish_df.columns and not fish_df['method'].isna().all():
                 spm = fish_df.groupby(['species','method']).agg(catch=('catch','sum')).reset_index()
                 species = st.selectbox("Select Species", spm['species'].unique().tolist())
@@ -182,5 +188,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
